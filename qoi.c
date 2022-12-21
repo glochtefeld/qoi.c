@@ -12,6 +12,13 @@ static uint32_t switch_endian(uint32_t n) {
         | ((n << 24)    & 0xFF000000);  // 0 -> 3
 }
 
+static inline int between(int a, int x, int b) {
+    return a < x && x < b;
+}
+static inline int minor_difference(int x) { between(-3, x, 2); }
+static inline int diff_lt_16(int x) { between(-9, x, 8); }
+static inline int diff_lt_32(int x) { between(-33, x, 32); }
+
 qoi_status qoi_read(const char *path, qoi_image *output) {
     // 1. read data
     FILE *f = fopen(path, "rb");
@@ -78,18 +85,65 @@ qoi_status qoi_encode(qoi_header *header, const char* data, uint32_t length, qoi
         return QOI_CANNOT_MALLOC;
 
     // 4. loop over input data, checking for possible compressions
+    int is_rgba = header->channels == 4;
     int out_idx = 0;
     qoi_rgba prev, current, next;
     prev.v=0xFF0000000; // equivalent to r=0,b=0,g=0,a=255
     current.v = read_int(data, 0);
     next.v = read_int(data, header->channels);
-    for (int i=0; i < length; next.v = read_int(data, i)) {
+    for (int i=header->channels; i < length; next.v = read_int(data, i)) {
+        #if 1
+        // Back to basics. Testing every case first.
+
+        // Case 1: An RGBA pixel is encountered.
+
+        // Case 2: An RGB pixel is encountered.
+
+        // Case 3: Multiple pixels are encountered with a duplicate requiring an index.
+
+        // Case 4: A run of identical pixels is encountered.
+
+        // Case 5: A series of *nearly* identical pixels is encountered.
+
+        // Case 6: A series of pixels that work with the luma compression are encountered.
+
+        #else
         int currenthash = qoi_hash(data[i], 1);
         if (current.v == prev.v && current.v == next.v) { // Run detected
+
         }
         else if (current.v == prev.v) { // Not a run but a duplicate
 
         }
+        else {
+            int dr = prev.rgba.r - current.rgba.r;
+            int dg = prev.rgba.g - current.rgba.g;
+            int db = prev.rgba.b - current.rgba.b;
+            int da = prev.rgba.a - current.rgba.a;
+            int dr_dg = dr - dg;
+            int db_dg = db - dg;
+
+            if (minor_difference(dr) 
+                && minor_difference(dg) 
+                && minor_difference(db)
+                && da == 0) {
+                    // Do not use rgba for this path
+                    // QOI_OP_DIFF
+
+                }
+            else if (diff_lt_16(dr_dg) && diff_lt_16(db_dg) && diff_lt_32(dg) && da == 0) {
+                // QOI_OP_LUMA
+            }
+            else {
+                // Just add it as a new pixel
+                if (is_rgba) {
+
+                } else {
+
+                }
+            }
+        }
+        #endif
 
         // next iter prep
         prev.v = current.v;
