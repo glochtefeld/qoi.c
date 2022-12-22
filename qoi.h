@@ -1,18 +1,17 @@
-#pragma once
+#ifndef QOI_H
+#define QOI_H
 #include <stdint.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#define QOI_OP_INDEX	0x00 // 00xxxxxx
+#define QOI_OP_DIFF	    0x40 // 01xxxxxx
+#define QOI_OP_LUMA	    0x80 // 10xxxxxx
+#define QOI_OP_RUN	    0xC0 // 11xxxxxx
+#define QOI_OP_RGB	    0xFE // 11111110
+#define QOI_OP_RGBA	    0xFF // 11111111
 
-typedef enum { // Note: QOI spec is big endian
-    QOI_OP_INDEX = 0x00000000, // first byte is 0
-    QOI_OP_DIFF = 0x00000001, // first byte is 1
-    QOI_OP_LUMA = 0x00000002, // first byte is 2
-    QOI_OP_RUN = 0x00000003, // first byte is 3
-    QOI_OP_RGB = 0x000000FE, // first byte is 254
-    QOI_OP_RGBA = 0x000000FF, // first byte is 255
-} QOI_BIT_MASK;
+#define QOI_HDR_LEN    14
+#define QOI_PADDING_LEN 8
+#define QOI_MAGIC ('q' << 24 | 'o' << 16 | 'i' << 8 | 'f' )
 
 typedef enum {
     QOI_OK,
@@ -23,6 +22,10 @@ typedef enum {
     QOI_NULLPTR_PASSED,
     QOI_BAD_HEADER,
 } qoi_status;
+
+extern const char *statuses[];
+
+#define GET_QOI_STATUS(i) statuses[i]
 
 typedef struct {
     uint32_t width;
@@ -38,17 +41,18 @@ typedef union {
 
 typedef struct {
     qoi_header *header;
-    qoi_rgba *pixels;
+    char *pixels;
 } qoi_image;
 
 
+// Given a filepath, will read in a qoi image and decode it into the header and raw bytes.
 qoi_status qoi_read(const char* path, qoi_image *output);
-qoi_status qoi_write(const char* path, qoi_image *image);
-qoi_status qoi_encode(qoi_header *header, const char* data, uint32_t length, qoi_image *output);
-qoi_status qoi_decode(const char* data, uint32_t length, char *output);
+// Given an array of bytes and its length, returns the header and bytes for the file. Driver for qoi_read().
+qoi_status qoi_decode(const char* data, uint32_t length, qoi_image *output);
 
-int qoi_free(qoi_image *image);
+// Given an image, encodes and writes that image to path.
+qoi_status qoi_write(const char* path, const qoi_image *image);
+// Given an image, returns the encoded image data. 
+uint8_t *qoi_encode(const qoi_image *image, uint32_t *outlen, qoi_status *out_status);
 
-#ifdef __cplusplus
-}
-#endif
+#endif // QOI_H

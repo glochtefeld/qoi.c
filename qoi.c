@@ -1,166 +1,120 @@
 #include "qoi.h"
-#include "stdlib.h"
-#include "string.h"
-#include "stdio.h"
+#include <byteswap.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
 
-#define QOI_MAGIC ('q'<<24 | 'o' << 16 | 'i' << 8 | 'f')
+const char *statuses[] = {
+    "QOI_OK",
+    "QOI_BAD_FPATH",
+    "QOI_CANNOT_MALLOC",
+    "QOI_FREAD_ERR",
+    "QOI_DECODE_ERR",
+    "QOI_NULLPTR_PASSED",
+    "QOI_BAD_HEADER",
+};
+static const char qoi_padding[] = { 0, 0, 0, 0, 0, 0, 0, 1 };
 
-static uint32_t switch_endian(uint32_t n) {
-    return ((n >> 24)   & 0x000000FF)   // 3 -> 0
-        | ((n << 8)     & 0x00FF0000)   // 1 -> 2
-        | ((n >> 8)     & 0x0000FF00)   // 2 -> 1
-        | ((n << 24)    & 0xFF000000);  // 0 -> 3
+// Big endian; 0x01020304 should become 0x01 0x02 0x03 0x04
+static void write_i32(uint32_t data, char *buf, int *idx) {
+    buf[(*idx)++] = data >> 24;
+    buf[(*idx)++] = (data >> 16) & 0xFF;
+    buf[(*idx)++] = (data >> 8) & 0xFF;
+    buf[(*idx)++] = data & 0xFF;
+}
+inline static int qoi_hash_rgba(qoi_rgba px) {
+    return px.rgba.r * 3 + px.rgba.g * 5 + px.rgba.b * 7 + px.rgba.a * 11;
 }
 
-static inline int between(int a, int x, int b) {
-    return a < x && x < b;
-}
-static inline int minor_difference(int x) { between(-3, x, 2); }
-static inline int diff_lt_16(int x) { between(-9, x, 8); }
-static inline int diff_lt_32(int x) { between(-33, x, 32); }
-
-qoi_status qoi_read(const char *path, qoi_image *output) {
-    // 1. read data
-    FILE *f = fopen(path, "rb");
-    if (f == NULL) {
-        return QOI_BAD_FPATH;
+uint8_t *qoi_encode(const qoi_image *image, uint32_t *outlen, qoi_status *out_status) {
+    #define NEXTOUT output[(*outlen)++]
+    if (image == NULL) {
+        *out_status = QOI_NULLPTR_PASSED;
+        return NULL;
     }
-    fseek(f, 0L, SEEK_END);
-    size_t filesize = ftell(f);
-    rewind(f);
-    char *buffer = malloc(filesize + 1);
-    if (buffer == NULL) {
-        return QOI_CANNOT_MALLOC;
-    }
-    size_t bytesRead = fread(buffer, sizeof(char), filesize, f);
-    if (bytesRead < filesize) {
-        return QOI_FREAD_ERR;
-    }
-    buffer[bytesRead] = '\0';
-    fclose(f);
-
-    // 2. Copy all that data into the output
-    int decoded = qoi_decode(buffer, filesize + 1, output->pixels);
-    if (decoded != 0) {
-        return QOI_DECODE_ERR;
+    if (image->header->width == 0 || image->header->height == 0
+        || image->header->channels < 3 || image->header->channels > 4
+        || image->header->colorspace > 1) {
+        *out_status = QOI_BAD_HEADER;
+        return NULL;
     }
 
-    return QOI_OK;
-}
+    char *pixels = image->pixels;
+    uint32_t px_len = image->header->width * image->header->height * image->header->channels;
+    uint32_t last_px_idx = px_len - image->header->channels;
+    int is_rgba = image->header->channels == 4;
 
-int qoi_free(qoi_image *image) {
-    free(image->pixels);
-    free(image->header);
-}
+    int maxlen = QOI_HDR_LEN 
+        + image->header->width * image->header->height * (image->header->channels + 1) 
+        + sizeof(qoi_padding);
+    uint8_t *output = malloc(sizeof(uint8_t) * maxlen);
+    *outlen = 0;
 
-static const uint8_t qoi_padding[8] = {0,0,0,0,0,0,0,1};
-static uint32_t read_int (unsigned char *bytes, int *p) {
-    int a = bytes[(*p)++] << 24;
-    int r = bytes[(*p)++] << 16;
-    int g = bytes[(*p)++] << 8;
-    int b = bytes[(*p)++];
-    return a | r | g | b;
-}
+    // write header data
+    write_i32(QOI_MAGIC, output, outlen);
+    write_i32(image->header->width, output, outlen);
+    write_i32(image->header->height, output, outlen);
+    NEXTOUT = image->header->channels;
+    NEXTOUT = image->header->colorspace;
 
-// Purpose: encode an array of RGBA values into a valid QOI format
-// TODO: make it so this works with both rgb and rgba instead of just rgba
-qoi_status qoi_encode(qoi_header *header, const char* data, uint32_t length, qoi_image *output) {
-    if (header == NULL || data == NULL || output == NULL)
-        return QOI_NULLPTR_PASSED;
-    if (header->width == 0 || header->height == 0
-        || header->channels < 3 || header->channels > 4
-        || header->colorspace > 1) {
-            return QOI_BAD_HEADER;
-        }
-    // 1. Set header data
-    output->header = &header;
+    // prep lookup table and run variables
+    int runlen = 0;
+    qoi_rgba lookup[64];
+    memset(lookup, 0, sizeof(lookup));
 
-    // 2. Create index lookup array
-    qoi_rgba indices[64];
-    memset(indices, 0, 64);
+    // write actual data
+    qoi_rgba prev = {.v = 0xFF000000 }; // ABGR
+    qoi_rgba current = prev;
+    for (int px_idx=0; px_idx < px_len; px_idx += image->header->channels) {
+        current.rgba.r = pixels[px_idx+0];       
+        current.rgba.g = pixels[px_idx+1];       
+        current.rgba.b = pixels[px_idx+2];       
+        if (is_rgba)
+            current.rgba.a = pixels[px_idx+3];
+        
+        printf("current: 0x%08X(0x%08X)\t%X %X %X %X\n", current.v, __bswap_32(current.v), current.rgba.r, current.rgba.g, current.rgba.b, current.rgba.a);
 
-    // 3. Allocate memory for the data output
-    qoi_rgba *data_out = malloc(sizeof(qoi_rgba) * length + sizeof(qoi_padding));
-    if (data_out == NULL)
-        return QOI_CANNOT_MALLOC;
-
-    // 4. loop over input data, checking for possible compressions
-    int is_rgba = header->channels == 4;
-    int out_idx = 0;
-    qoi_rgba prev, current, next;
-    prev.v=0xFF0000000; // equivalent to r=0,b=0,g=0,a=255
-    current.v = read_int(data, 0);
-    next.v = read_int(data, header->channels);
-    for (int i=header->channels; i < length; next.v = read_int(data, i)) {
-        #if 1
-        // Back to basics. Testing every case first.
-
-        // Case 1: An RGBA pixel is encountered.
-
-        // Case 2: An RGB pixel is encountered.
-
-        // Case 3: Multiple pixels are encountered with a duplicate requiring an index.
-
-        // Case 4: A run of identical pixels is encountered.
-
-        // Case 5: A series of *nearly* identical pixels is encountered.
-
-        // Case 6: A series of pixels that work with the luma compression are encountered.
-
-        #else
-        int currenthash = qoi_hash(data[i], 1);
-        if (current.v == prev.v && current.v == next.v) { // Run detected
-
-        }
-        else if (current.v == prev.v) { // Not a run but a duplicate
-
-        }
-        else {
-            int dr = prev.rgba.r - current.rgba.r;
-            int dg = prev.rgba.g - current.rgba.g;
-            int db = prev.rgba.b - current.rgba.b;
-            int da = prev.rgba.a - current.rgba.a;
-            int dr_dg = dr - dg;
-            int db_dg = db - dg;
-
-            if (minor_difference(dr) 
-                && minor_difference(dg) 
-                && minor_difference(db)
-                && da == 0) {
-                    // Do not use rgba for this path
-                    // QOI_OP_DIFF
-
-                }
-            else if (diff_lt_16(dr_dg) && diff_lt_16(db_dg) && diff_lt_32(dg) && da == 0) {
-                // QOI_OP_LUMA
+        if (current.v == prev.v) {
+            printf("found run\n");
+            runlen++;
+            if (runlen == 62 || px_idx == last_px_idx) {
+                NEXTOUT = QOI_OP_RUN | (runlen - 1);
+                runlen = 0;
             }
-            else {
-                // Just add it as a new pixel
-                if (is_rgba) {
-
-                } else {
-
-                }
-            }
+            goto nextloop; // Look, we can't afford all these levels of indentation! In this economy?
         }
-        #endif
 
-        // next iter prep
-        prev.v = current.v;
-        current.v = next.v;
-        i += header->channels;
+        if (runlen > 0) { // no matter what, we can reset the run length
+            printf("Ending run\n");
+            NEXTOUT = QOI_OP_RUN | (runlen - 1);
+            runlen = 0;
+        }
+
+        // int index = qoi_hash_rgba(current) % 64;
+        // if (lookup[index].v == current.v) {
+        //     NEXTOUT = QOI_OP_INDEX | index;
+        //     goto nextloop;
+        // } 
+
+        // lookup[index] = current;
+
+        
+        if (is_rgba) {
+            NEXTOUT = QOI_OP_RGBA;
+            write_i32(current.v, output, outlen);
+        } else {
+            write_i32((QOI_OP_RGB << 24) | current.v, output, outlen);
+        }
+
+nextloop:
+        prev = current;
     }
-    output->pixels = &data_out;
-}
+    
+    // write padding data
+    for (int i=0; i<(int)sizeof(qoi_padding); i++)
+        output[(*outlen)++] = qoi_padding[i];
 
-// Purpose: Decode a datastream into image data
-qoi_status qoi_decode(const char* data, uint32_t length, char *output) {
-
-}
-
-static int qoi_hash(char *pixel, int use_alpha) { // rgba
-    return (pixel[0] * 3
-        + pixel[1] * 5
-        + pixel[2] * 7
-        + ( use_alpha ? pixel[3] : 255 ) * 11) % 64;
+    *out_status = QOI_OK;
+    return output;
+    #undef NEXTOUT
 }
