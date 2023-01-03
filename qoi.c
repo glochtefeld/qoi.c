@@ -15,7 +15,7 @@ const char *statuses[] = {
 };
 static const char qoi_padding[] = { 0, 0, 0, 0, 0, 0, 0, 1 };
 
-// Big endian; 0x01020304 should become 0x01 0x02 0x03 0x04
+// Big endian; 0x04030201 should become 0x01 0x02 0x03 0x04
 static void write_i32(uint32_t data, char *buf, int *idx) {
     buf[(*idx)++] = data >> 24;
     buf[(*idx)++] = (data >> 16) & 0xFF;
@@ -94,17 +94,20 @@ uint8_t *qoi_encode(const qoi_image *image, uint32_t *outlen, qoi_status *out_st
     qoi_rgba prev = {.v = 0xFF000000 }; // ABGR
     qoi_rgba current = prev;
     for (int px_idx=0; px_idx < px_len; px_idx += image->header->channels) {
-        current.rgba.r = pixels[px_idx+0];       
-        current.rgba.g = pixels[px_idx+1];       
-        current.rgba.b = pixels[px_idx+2];       
-        if (is_rgba)
-            current.rgba.a = pixels[px_idx+3];
+        int offset = 0;
+        if (is_rgba) {
+            current.rgba.a = pixels[px_idx + (offset++)];
+        }
+        current.rgba.b = pixels[px_idx + (offset++)];       
+        current.rgba.g = pixels[px_idx + (offset++)];       
+        current.rgba.r = pixels[px_idx + (offset++)];       
         
         printf("current(previous): 0x%08X(0x%08X)\n", __bswap_32(current.v), __bswap_32(prev.v));
+        printf("  %X %X %X %X\n", current.rgba.r, current.rgba.g, current.rgba.b, current.rgba.a);
 
         if (current.v == prev.v) {
-            printf("found run\n");
             runlen++;
+            printf("found run of len %d\n", runlen);
             if (runlen == 62 || px_idx == last_px_idx) {
                 NEXTOUT = QOI_OP_RUN | (runlen - 1);
                 runlen = 0;
@@ -163,8 +166,9 @@ nextloop:
     }
     
     // write padding data
+    printf("Writing end padding\n");
     for (int i=0; i<(int)sizeof(qoi_padding); i++)
-        output[(*outlen)++] = qoi_padding[i];
+        NEXTOUT = qoi_padding[i];
 
     *out_status = QOI_OK;
     return output;

@@ -35,8 +35,8 @@ typedef struct {
 } qoi_header;
 
 typedef union {
-    struct { unsigned char r, g, b, a; } rgba;
-    unsigned int v;
+    struct { uint8_t r, g, b, a; } rgba;
+    uint32_t v;
 } qoi_rgba;
 #define QOI_HASH(C) (C.rgba.r * 3 + C.rgba.g * 5 + C.rgba.b * 7 + C.rgba.a * 11)
 
